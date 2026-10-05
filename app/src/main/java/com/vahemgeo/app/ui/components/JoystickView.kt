@@ -21,6 +21,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.vahemgeo.app.ui.theme.CyberTeal
+import com.vahemgeo.app.ui.theme.ElectricLime
+import com.vahemgeo.app.ui.theme.PolarWhite
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -29,8 +32,8 @@ import kotlin.math.sin
 @Composable
 fun JoystickView(
     modifier: Modifier = Modifier,
-    size: Dp = 140.dp,
-    knobSize: Dp = 50.dp,
+    size: Dp = 135.dp,
+    knobSize: Dp = 48.dp,
     onJoystickMoved: (bearingDegrees: Float, intensity: Float) -> Unit,
     onJoystickReleased: () -> Unit
 ) {
@@ -45,7 +48,7 @@ fun JoystickView(
         modifier = modifier
             .size(size)
             .background(
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                color = CyberTeal.copy(alpha = 0.85f),
                 shape = CircleShape
             )
             .pointerInput(Unit) {
@@ -100,27 +103,34 @@ fun JoystickView(
             },
         contentAlignment = Alignment.Center
     ) {
-        // Outer ring & Direction guides
-        val primaryColor = MaterialTheme.colorScheme.primary
-        val outlineColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-
+        // Outer Luminous Electric Lime Ring
         Canvas(modifier = Modifier.size(size)) {
             val center = Offset(sizePx / 2f, sizePx / 2f)
             drawCircle(
-                color = outlineColor,
+                color = ElectricLime.copy(alpha = 0.6f),
                 radius = maxRadiusPx + knobSizePx / 2f,
                 style = Stroke(width = 3.dp.toPx())
             )
         }
 
-        // Inner Knob
+        // Inner Luminous Electric Lime Knob with White Center Cap
         Box(
             modifier = Modifier
                 .size(knobSize)
                 .background(
-                    color = primaryColor,
+                    color = ElectricLime,
                     shape = CircleShape
-                )
-        )
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(16.dp)
+                    .background(
+                        color = PolarWhite,
+                        shape = CircleShape
+                    )
+            )
+        }
     }
 }
