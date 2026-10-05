@@ -13,18 +13,33 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DirectionsBike
+import androidx.compose.material.icons.filled.DirectionsCar
+import androidx.compose.material.icons.filled.DirectionsWalk
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -73,7 +88,7 @@ fun MapScreen(
 
     var selectedSpeedKmH by remember { mutableFloatStateOf(SpeedMode.WALK.speedKmH) }
 
-    // Update selected location when service reports movement changes
+    // Synchronize location updates from mock service
     LaunchedEffect(currentLocation) {
         if (isSpoofingActive && currentLocation != null) {
             val point = GeoPoint(currentLocation.first, currentLocation.second)
@@ -133,17 +148,18 @@ fun MapScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Top Controls Panel (Status & Developer Options Warning)
+        // Top Status Header & Safe Inset Warning (Safe Area Padding)
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 44.dp, start = 16.dp, end = 16.dp)
+                .statusBarsPadding()
+                .padding(top = 12.dp, start = 16.dp, end = 16.dp)
                 .fillMaxWidth()
         ) {
-            // Status Header Badge
+            // Status Header Pill
             Surface(
                 shape = RoundedCornerShape(24.dp),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
                 shadowElevation = 6.dp,
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             ) {
@@ -171,28 +187,40 @@ fun MapScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Warning Banner if Mock Provider missing in Developer Options
+            // Warning Card for Mock Location in Developer Options
             AnimatedVisibility(visible = securityError != null) {
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.errorContainer
                     ),
+                    shape = RoundedCornerShape(16.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            text = "Mock Location Not Enabled",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            fontWeight = FontWeight.Bold
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Warning",
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(28.dp)
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Set 'VahemGeo' as the Mock Location App in Android Developer Options.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Mock Location Not Set",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Select 'VahemGeo' in Developer Options",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
                         OutlinedButton(
                             onClick = {
                                 try {
@@ -202,22 +230,21 @@ fun MapScreen(
                                     val intent = Intent(Settings.ACTION_SETTINGS)
                                     context.startActivity(intent)
                                 }
-                            },
-                            modifier = Modifier.align(Alignment.End)
+                            }
                         ) {
-                            Text("Open Settings")
+                            Text("Open", fontSize = 12.sp)
                         }
                     }
                 }
             }
         }
 
-        // On-Screen Joystick when Spoofing is Active
+        // On-Screen Joystick positioned safely above bottom control card
         AnimatedVisibility(
             visible = isSpoofingActive,
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .padding(start = 24.dp, bottom = 220.dp)
+                .padding(start = 20.dp, bottom = 320.dp)
         ) {
             JoystickView(
                 size = 130.dp,
@@ -231,23 +258,26 @@ fun MapScreen(
             )
         }
 
-        // Bottom Control Panel Card
+        // Bottom Responsive Control Panel Card with Navigation Insets
         Card(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(16.dp)
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp)
                 .fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
+            shape = RoundedCornerShape(24.dp),
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)
             ),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier
+                    .padding(16.dp)
+                    .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Coordinates Text
+                // Coordinates Display
                 Text(
                     text = "${"%.6f".format(selectedLocation.latitude)}, ${"%.6f".format(selectedLocation.longitude)}",
                     style = MaterialTheme.typography.titleMedium,
@@ -255,15 +285,19 @@ fun MapScreen(
                     color = MaterialTheme.colorScheme.onSurface
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Speed Presets Row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
+                // Material 3 Responsive Segmented Speed Selector (No vertical squishing!)
+                SingleChoiceSegmentedButtonRow(
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    SpeedMode.entries.forEach { mode ->
-                        FilterChip(
+                    SpeedMode.entries.forEachIndexed { index, mode ->
+                        val icon = when (mode) {
+                            SpeedMode.WALK -> Icons.Default.DirectionsWalk
+                            SpeedMode.CYCLE -> Icons.Default.DirectionsBike
+                            SpeedMode.DRIVE -> Icons.Default.DirectionsCar
+                        }
+                        SegmentedButton(
                             selected = selectedSpeedKmH == mode.speedKmH,
                             onClick = {
                                 selectedSpeedKmH = mode.speedKmH
@@ -271,10 +305,25 @@ fun MapScreen(
                                     onUpdateMovement(0f, 0f, selectedSpeedKmH)
                                 }
                             },
-                            label = { Text("${mode.icon} ${mode.label} (${mode.speedKmH.toInt()} km/h)") }
-                        )
+                            shape = SegmentedButtonDefaults.itemShape(index = index, count = SpeedMode.entries.size),
+                            icon = {
+                                Icon(
+                                    imageVector = icon,
+                                    contentDescription = mode.label,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        ) {
+                            Text(
+                                text = "${mode.label} (${mode.speedKmH.toInt()})",
+                                fontSize = 12.sp,
+                                maxLines = 1
+                            )
+                        }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // Custom Speed Slider
                 Row(
@@ -283,8 +332,9 @@ fun MapScreen(
                 ) {
                     Text(
                         text = "Speed: ${selectedSpeedKmH.toInt()} km/h",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.width(100.dp)
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.width(110.dp)
                     )
                     Slider(
                         value = selectedSpeedKmH,
@@ -299,18 +349,27 @@ fun MapScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
-                // System Overlay Toggle Switch Row
+                // Floating System Overlay Row
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(
-                        text = "Floating System Joystick Overlay",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.OpenInNew,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Floating System Joystick Overlay",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
                     Switch(
                         checked = isOverlayRunning,
                         onCheckedChange = { enable ->
@@ -331,9 +390,9 @@ fun MapScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Main Toggle Button
+                // Main Toggle Action Button
                 Button(
                     onClick = {
                         if (isSpoofingActive) {
@@ -350,11 +409,17 @@ fun MapScreen(
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (isSpoofingActive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                     ),
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp)
+                        .height(50.dp)
                 ) {
+                    Icon(
+                        imageVector = if (isSpoofingActive) Icons.Default.Stop else Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = if (isSpoofingActive) "STOP SPOOFING" else "START SPOOFING",
                         fontWeight = FontWeight.Bold,

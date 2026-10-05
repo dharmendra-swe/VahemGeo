@@ -4,17 +4,19 @@ import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
-import android.os.Build
+import android.graphics.RectF
+import android.graphics.drawable.GradientDrawable
 import android.os.IBinder
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.vahemgeo.app.engine.SpeedMode
@@ -22,8 +24,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
-import kotlin.math.roundToInt
+import kotlin.math.sin
 
 class JoystickOverlayService : Service() {
     private lateinit var windowManager: WindowManager
@@ -70,37 +73,46 @@ class JoystickOverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 100
-            y = 300
+            x = 80
+            y = 250
         }
 
         val context = this
-        val rootLayout = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xCC1E1E1E.toInt())
-            setPadding(20, 16, 20, 20)
-            elevation = 16f
+
+        // Main Container Card with Rounded Corners & Semi-transparent Dark Background
+        val cardBackground = GradientDrawable().apply {
+            setColor(Color.parseColor("#EE121212"))
+            cornerRadius = 48f
+            setStroke(2, Color.parseColor("#33FFFFFF"))
         }
 
-        // Header / Drag Handle
+        val rootLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = cardBackground
+            setPadding(28, 20, 28, 24)
+            elevation = 20f
+        }
+
+        // Header / Drag handle bar
         val headerLayout = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, 12)
+            setPadding(0, 0, 0, 16)
         }
 
         val dragTitle = TextView(context).apply {
-            text = "❖ StealthGPS"
-            setTextColor(0xFFFFFFFF.toInt())
+            text = "StealthGPS"
+            setTextColor(Color.parseColor("#E0E0E0"))
             textSize = 12f
+            paint.isFakeBoldText = true
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
 
         val closeBtn = TextView(context).apply {
             text = "✕"
-            setTextColor(0xFFFF5252.toInt())
-            textSize = 16f
-            setPadding(12, 0, 12, 0)
+            setTextColor(Color.parseColor("#FF5252"))
+            textSize = 15f
+            setPadding(16, 4, 16, 4)
             setOnClickListener {
                 stopSelf()
             }
@@ -109,7 +121,7 @@ class JoystickOverlayService : Service() {
         headerLayout.addView(dragTitle)
         headerLayout.addView(closeBtn)
 
-        // Dragging the overlay around the screen
+        // Dragging overlay position across screen
         var initialX = 0
         var initialY = 0
         var initialTouchX = 0f
@@ -134,93 +146,65 @@ class JoystickOverlayService : Service() {
             }
         }
 
-        // Joystick Area (Outer Circle + Inner Knob)
-        val joystickSizePx = 280
-        val knobSizePx = 100
-        val maxRadiusPx = (joystickSizePx - knobSizePx) / 2.0f
+        // Custom Drawn Circular Joystick View
+        val joystickSizePx = 240
+        val joystickView = CircularJoystickCanvasView(context, joystickSizePx) { bearing, intensity ->
+            VahemMockService.updateMovement(this, bearing, intensity, activeSpeed)
+        }
 
-        val joystickContainer = FrameLayout(context).apply {
+        val joystickFrame = FrameLayout(context).apply {
             layoutParams = LinearLayout.LayoutParams(joystickSizePx, joystickSizePx).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
             }
-            setBackgroundColor(0x33FFFFFF.toInt())
         }
+        joystickFrame.addView(joystickView)
 
-        val knobView = View(context).apply {
-            layoutParams = FrameLayout.LayoutParams(knobSizePx, knobSizePx).apply {
-                gravity = Gravity.CENTER
-            }
-            setBackgroundColor(0xFF2196F3.toInt())
-        }
-        joystickContainer.addView(knobView)
-
-        // Touch listener for joystick movement
-        joystickContainer.setOnTouchListener { v, event ->
-            val centerX = v.width / 2.0f
-            val centerY = v.height / 2.0f
-
-            when (event.action) {
-                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
-                    val dx = event.x - centerX
-                    val dy = event.y - centerY
-                    val distance = hypot(dx.toDouble(), dy.toDouble()).toFloat()
-
-                    val clampedDistance = distance.coerceAtMost(maxRadiusPx)
-                    val angleRad = atan2(dy.toDouble(), dx.toDouble()).toFloat()
-
-                    val knobX = (clampedDistance * kotlin.math.cos(angleRad.toDouble())).toFloat()
-                    val knobY = (clampedDistance * kotlin.math.sin(angleRad.toDouble())).toFloat()
-
-                    knobView.translationX = knobX
-                    knobView.translationY = knobY
-
-                    val intensity = (clampedDistance / maxRadiusPx).coerceIn(0f, 1f)
-
-                    // Convert screen dx, dy to geographical bearing (0 degrees = North)
-                    var bearingDegrees = Math.toDegrees(atan2(dx.toDouble(), -dy.toDouble())).toFloat()
-                    if (bearingDegrees < 0) bearingDegrees += 360f
-
-                    VahemMockService.updateMovement(this, bearingDegrees, intensity, activeSpeed)
-                    true
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    knobView.translationX = 0f
-                    knobView.translationY = 0f
-                    VahemMockService.updateMovement(this, 0f, 0f, activeSpeed)
-                    true
-                }
-                else -> false
-            }
-        }
-
-        // Speed preset buttons bar
+        // Speed Preset Buttons Bar
         val speedLayout = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, 12, 0, 0)
+            setPadding(0, 16, 0, 0)
         }
 
+        val speedButtons = mutableListOf<TextView>()
+
         SpeedMode.entries.forEach { mode ->
-            val btn = Button(context).apply {
-                text = "${mode.icon} ${mode.speedKmH.toInt()}"
+            val isSelected = activeSpeed == mode.speedKmH
+            val btnBg = GradientDrawable().apply {
+                setColor(if (isSelected) Color.parseColor("#2196F3") else Color.parseColor("#2A2A2A"))
+                cornerRadius = 24f
+            }
+
+            val btn = TextView(context).apply {
+                text = "${mode.label} ${mode.speedKmH.toInt()}k"
                 textSize = 10f
-                setPadding(8, 0, 8, 0)
+                setTextColor(if (isSelected) Color.WHITE else Color.parseColor("#B0B0B0"))
+                setPadding(20, 12, 20, 12)
+                background = btnBg
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
-                    80
+                    LinearLayout.LayoutParams.WRAP_CONTENT
                 ).apply {
-                    setMargins(4, 0, 4, 0)
+                    setMargins(6, 0, 6, 0)
                 }
                 setOnClickListener {
                     activeSpeed = mode.speedKmH
+                    speedButtons.forEachIndexed { idx, tv ->
+                        val selected = SpeedMode.entries[idx].speedKmH == activeSpeed
+                        (tv.background as GradientDrawable).setColor(
+                            if (selected) Color.parseColor("#2196F3") else Color.parseColor("#2A2A2A")
+                        )
+                        tv.setTextColor(if (selected) Color.WHITE else Color.parseColor("#B0B0B0"))
+                    }
                     VahemMockService.updateMovement(context, 0f, 0f, activeSpeed)
                 }
             }
+            speedButtons.add(btn)
             speedLayout.addView(btn)
         }
 
         rootLayout.addView(headerLayout)
-        rootLayout.addView(joystickContainer)
+        rootLayout.addView(joystickFrame)
         rootLayout.addView(speedLayout)
 
         overlayView = rootLayout
@@ -269,5 +253,84 @@ class JoystickOverlayService : Service() {
             }
             context.startService(intent)
         }
+    }
+}
+
+/**
+ * Custom Canvas-rendered circular Joystick View for System Overlay
+ */
+private class CircularJoystickCanvasView(
+    context: Context,
+    private val viewSizePx: Int,
+    private val onMoved: (bearing: Float, intensity: Float) -> Unit
+) : View(context) {
+
+    private val outerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#33FFFFFF")
+        style = Paint.Style.FILL
+    }
+
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#66FFFFFF")
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+    }
+
+    private val knobPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#2196F3")
+        style = Paint.Style.FILL
+    }
+
+    private val centerPos = viewSizePx / 2f
+    private val knobRadius = 40f
+    private val maxRadius = (viewSizePx / 2f) - knobRadius
+
+    private var knobX = centerPos
+    private var knobY = centerPos
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(viewSizePx, viewSizePx)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        // Outer Base Circle
+        canvas.drawCircle(centerPos, centerPos, maxRadius + (knobRadius / 2f), outerPaint)
+        canvas.drawCircle(centerPos, centerPos, maxRadius + (knobRadius / 2f), strokePaint)
+
+        // Inner Knob
+        canvas.drawCircle(knobX, knobY, knobRadius, knobPaint)
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.action) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                val dx = event.x - centerPos
+                val dy = event.y - centerPos
+                val dist = hypot(dx.toDouble(), dy.toDouble()).toFloat()
+                val clampedDist = dist.coerceAtMost(maxRadius)
+                val angle = atan2(dy.toDouble(), dx.toDouble())
+
+                knobX = centerPos + (clampedDist * cos(angle)).toFloat()
+                knobY = centerPos + (clampedDist * sin(angle)).toFloat()
+                invalidate()
+
+                val intensity = (clampedDist / maxRadius).coerceIn(0f, 1f)
+                var bearing = Math.toDegrees(atan2(dx.toDouble(), -dy.toDouble())).toFloat()
+                if (bearing < 0) bearing += 360f
+
+                onMoved(bearing, intensity)
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                knobX = centerPos
+                knobY = centerPos
+                invalidate()
+                onMoved(0f, 0f)
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
     }
 }
