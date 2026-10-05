@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "com.vahemgeo.app"
     compileSdk = 35
+    buildToolsVersion = "34.0.0"
 
     defaultConfig {
         applicationId = "com.vahemgeo.app"
