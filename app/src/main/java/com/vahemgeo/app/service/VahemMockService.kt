@@ -11,6 +11,8 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.vahemgeo.app.MainActivity
 import com.vahemgeo.app.engine.MockLocationManager
+import com.vahemgeo.app.engine.MovementUtils
+import com.vahemgeo.app.engine.SpeedMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,6 +33,13 @@ class VahemMockService : Service() {
     private var currentLat: Double = 0.0
     @Volatile
     private var currentLng: Double = 0.0
+
+    @Volatile
+    private var activeSpeedKmH: Float = SpeedMode.WALK.speedKmH
+    @Volatile
+    private var activeBearing: Float = 0f
+    @Volatile
+    private var activeIntensity: Float = 0f
 
     override fun onCreate() {
         super.onCreate()
@@ -55,9 +64,17 @@ class VahemMockService : Service() {
                 _currentLocation.value = Pair(currentLat, currentLng)
                 return START_STICKY
             }
+            ACTION_UPDATE_MOVEMENT -> {
+                activeBearing = intent?.getFloatExtra(EXTRA_BEARING, activeBearing) ?: activeBearing
+                activeIntensity = intent?.getFloatExtra(EXTRA_INTENSITY, activeIntensity) ?: activeIntensity
+                activeSpeedKmH = intent?.getFloatExtra(EXTRA_SPEED, activeSpeedKmH) ?: activeSpeedKmH
+                _currentSpeed.value = activeSpeedKmH
+                return START_STICKY
+            }
             ACTION_START_SPOOFING -> {
                 currentLat = intent?.getDoubleExtra(EXTRA_LAT, 0.0) ?: 0.0
                 currentLng = intent?.getDoubleExtra(EXTRA_LNG, 0.0) ?: 0.0
+                activeSpeedKmH = intent?.getFloatExtra(EXTRA_SPEED, activeSpeedKmH) ?: activeSpeedKmH
 
                 startForeground(NOTIFICATION_ID, buildNotification(currentLat, currentLng))
                 startSpoofingLoop(currentLat, currentLng)
@@ -72,16 +89,30 @@ class VahemMockService : Service() {
         currentLat = lat
         currentLng = lng
         _currentLocation.value = Pair(currentLat, currentLng)
+        _currentSpeed.value = activeSpeedKmH
 
         try {
             mockManager.setupMockProviders()
             _isSpoofingActive.value = true
             _securityError.value = null
 
+            val updateIntervalMs = 500L // 2 updates per second for smooth joystick movement
+
             spoofJob = serviceScope.launch {
                 while (_isSpoofingActive.value) {
-                    mockManager.pushLocation(currentLat, currentLng)
-                    delay(1000)
+                    if (activeIntensity > 0.05f) {
+                        val effectiveSpeed = activeSpeedKmH * activeIntensity
+                        val distanceMeters = MovementUtils.speedToMetersPerInterval(effectiveSpeed, updateIntervalMs)
+                        val (nextLat, nextLng) = MovementUtils.calculateNextCoordinates(
+                            currentLat, currentLng, distanceMeters, activeBearing
+                        )
+                        currentLat = nextLat
+                        currentLng = nextLng
+                        _currentLocation.value = Pair(currentLat, currentLng)
+                    }
+
+                    mockManager.pushLocation(currentLat, currentLng, bearing = activeBearing)
+                    delay(updateIntervalMs)
                 }
             }
         } catch (e: SecurityException) {
@@ -98,6 +129,7 @@ class VahemMockService : Service() {
 
     private fun stopSpoofing() {
         _isSpoofingActive.value = false
+        activeIntensity = 0f
         spoofJob?.cancel()
         mockManager.removeMockProviders()
     }
@@ -138,7 +170,7 @@ class VahemMockService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("VahemGeo Location Spoofer")
-            .setContentText("Active location: ${"%.5f".format(lat)}, ${"%.5f".format(lng)}")
+            .setContentText("Active: ${"%.5f".format(lat)}, ${"%.5f".format(lng)} | ${activeSpeedKmH.toInt()} km/h")
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
             .setContentIntent(openAppPendingIntent)
             .setOngoing(true)
@@ -166,9 +198,13 @@ class VahemMockService : Service() {
         const val ACTION_START_SPOOFING = "com.vahemgeo.app.START_SPOOFING"
         const val ACTION_STOP_SPOOFING = "com.vahemgeo.app.STOP_SPOOFING"
         const val ACTION_UPDATE_LOCATION = "com.vahemgeo.app.UPDATE_LOCATION"
+        const val ACTION_UPDATE_MOVEMENT = "com.vahemgeo.app.UPDATE_MOVEMENT"
 
         const val EXTRA_LAT = "EXTRA_LAT"
         const val EXTRA_LNG = "EXTRA_LNG"
+        const val EXTRA_BEARING = "EXTRA_BEARING"
+        const val EXTRA_INTENSITY = "EXTRA_INTENSITY"
+        const val EXTRA_SPEED = "EXTRA_SPEED"
 
         private val _isSpoofingActive = MutableStateFlow(false)
         val isSpoofingActive: StateFlow<Boolean> = _isSpoofingActive.asStateFlow()
@@ -176,14 +212,18 @@ class VahemMockService : Service() {
         private val _currentLocation = MutableStateFlow<Pair<Double, Double>?>(null)
         val currentLocation: StateFlow<Pair<Double, Double>?> = _currentLocation.asStateFlow()
 
+        private val _currentSpeed = MutableStateFlow(SpeedMode.WALK.speedKmH)
+        val currentSpeed: StateFlow<Float> = _currentSpeed.asStateFlow()
+
         private val _securityError = MutableStateFlow<String?>(null)
         val securityError: StateFlow<String?> = _securityError.asStateFlow()
 
-        fun startService(context: Context, lat: Double, lng: Double) {
+        fun startService(context: Context, lat: Double, lng: Double, speedKmH: Float = SpeedMode.WALK.speedKmH) {
             val intent = Intent(context, VahemMockService::class.java).apply {
                 action = ACTION_START_SPOOFING
                 putExtra(EXTRA_LAT, lat)
                 putExtra(EXTRA_LNG, lng)
+                putExtra(EXTRA_SPEED, speedKmH)
             }
             context.startForegroundService(intent)
         }
@@ -200,6 +240,16 @@ class VahemMockService : Service() {
                 action = ACTION_UPDATE_LOCATION
                 putExtra(EXTRA_LAT, lat)
                 putExtra(EXTRA_LNG, lng)
+            }
+            context.startService(intent)
+        }
+
+        fun updateMovement(context: Context, bearing: Float, intensity: Float, speedKmH: Float) {
+            val intent = Intent(context, VahemMockService::class.java).apply {
+                action = ACTION_UPDATE_MOVEMENT
+                putExtra(EXTRA_BEARING, bearing)
+                putExtra(EXTRA_INTENSITY, intensity)
+                putExtra(EXTRA_SPEED, speedKmH)
             }
             context.startService(intent)
         }

@@ -1,9 +1,11 @@
 package com.vahemgeo.app.ui
 
 import android.content.Intent
+import android.net.Uri
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,15 +22,18 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -36,11 +41,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.vahemgeo.app.engine.SpeedMode
+import com.vahemgeo.app.service.JoystickOverlayService
+import com.vahemgeo.app.ui.components.JoystickView
 import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -50,20 +57,30 @@ import org.osmdroid.views.overlay.Marker
 @Composable
 fun MapScreen(
     isSpoofingActive: Boolean,
+    currentLocation: Pair<Double, Double>?,
+    currentSpeed: Float,
+    isOverlayRunning: Boolean,
     securityError: String?,
-    onStartSpoofing: (Double, Double) -> Unit,
+    onStartSpoofing: (Double, Double, Float) -> Unit,
     onStopSpoofing: () -> Unit,
-    onUpdateLocation: (Double, Double) -> Unit
+    onUpdateLocation: (Double, Double) -> Unit,
+    onUpdateMovement: (Float, Float, Float) -> Unit
 ) {
     val context = LocalContext.current
-    var selectedLocation by remember { mutableStateOf(GeoPoint(23.2599, 77.4126)) } // Default (Bhopal, MP)
+    var selectedLocation by remember { mutableStateOf(GeoPoint(23.2599, 77.4126)) }
     var mapViewRef by remember { mutableStateOf<MapView?>(null) }
     var markerRef by remember { mutableStateOf<Marker?>(null) }
 
-    // Synchronize marker when spoofing changes or location changes
-    LaunchedEffect(selectedLocation) {
-        if (isSpoofingActive) {
-            onUpdateLocation(selectedLocation.latitude, selectedLocation.longitude)
+    var selectedSpeedKmH by remember { mutableFloatStateOf(SpeedMode.WALK.speedKmH) }
+
+    // Update selected location when service reports movement changes
+    LaunchedEffect(currentLocation) {
+        if (isSpoofingActive && currentLocation != null) {
+            val point = GeoPoint(currentLocation.first, currentLocation.second)
+            selectedLocation = point
+            markerRef?.position = point
+            mapViewRef?.controller?.animateTo(point)
+            mapViewRef?.invalidate()
         }
     }
 
@@ -79,14 +96,16 @@ fun MapScreen(
             factory = { ctx ->
                 MapView(ctx).apply {
                     setMultiTouchControls(true)
-                    controller.setZoom(15.0)
+                    controller.setZoom(16.0)
                     controller.setCenter(selectedLocation)
 
                     val eventsOverlay = MapEventsOverlay(object : MapEventsReceiver {
                         override fun singleTapConfirmedHelper(p: GeoPoint): Boolean {
-                            selectedLocation = p
-                            markerRef?.position = p
-                            invalidate()
+                            if (!isSpoofingActive) {
+                                selectedLocation = p
+                                markerRef?.position = p
+                                invalidate()
+                            }
                             return true
                         }
 
@@ -114,19 +133,18 @@ fun MapScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Top Status Header / Security Warning
+        // Top Controls Panel (Status & Developer Options Warning)
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 48.dp, start = 16.dp, end = 16.dp)
+                .padding(top = 44.dp, start = 16.dp, end = 16.dp)
                 .fillMaxWidth()
         ) {
-            // Spoofing Status Badge
+            // Status Header Badge
             Surface(
                 shape = RoundedCornerShape(24.dp),
                 color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-                tonalElevation = 6.dp,
-                shadowElevation = 8.dp,
+                shadowElevation = 6.dp,
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             ) {
                 Row(
@@ -153,7 +171,7 @@ fun MapScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Developer options warning alert banner
+            // Warning Banner if Mock Provider missing in Developer Options
             AnimatedVisibility(visible = securityError != null) {
                 Card(
                     colors = CardDefaults.cardColors(
@@ -163,14 +181,14 @@ fun MapScreen(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text(
-                            text = "Mock Location Not Set!",
+                            text = "Mock Location Not Enabled",
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onErrorContainer,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Please set 'VahemGeo' as the Mock Location App in Android Developer Options.",
+                            text = "Set 'VahemGeo' as the Mock Location App in Android Developer Options.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onErrorContainer
                         )
@@ -187,11 +205,30 @@ fun MapScreen(
                             },
                             modifier = Modifier.align(Alignment.End)
                         ) {
-                            Text("Open Developer Options")
+                            Text("Open Settings")
                         }
                     }
                 }
             }
+        }
+
+        // On-Screen Joystick when Spoofing is Active
+        AnimatedVisibility(
+            visible = isSpoofingActive,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 24.dp, bottom = 220.dp)
+        ) {
+            JoystickView(
+                size = 130.dp,
+                knobSize = 48.dp,
+                onJoystickMoved = { bearing, intensity ->
+                    onUpdateMovement(bearing, intensity, selectedSpeedKmH)
+                },
+                onJoystickReleased = {
+                    onUpdateMovement(0f, 0f, selectedSpeedKmH)
+                }
+            )
         }
 
         // Bottom Control Panel Card
@@ -200,7 +237,7 @@ fun MapScreen(
                 .align(Alignment.BottomCenter)
                 .padding(16.dp)
                 .fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)
             ),
@@ -210,25 +247,104 @@ fun MapScreen(
                 modifier = Modifier.padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(
-                    text = "Selected Coordinates",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(4.dp))
+                // Coordinates Text
                 Text(
                     text = "${"%.6f".format(selectedLocation.latitude)}, ${"%.6f".format(selectedLocation.longitude)}",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                Spacer(modifier = Modifier.height(16.dp))
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Speed Presets Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    SpeedMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = selectedSpeedKmH == mode.speedKmH,
+                            onClick = {
+                                selectedSpeedKmH = mode.speedKmH
+                                if (isSpoofingActive) {
+                                    onUpdateMovement(0f, 0f, selectedSpeedKmH)
+                                }
+                            },
+                            label = { Text("${mode.icon} ${mode.label} (${mode.speedKmH.toInt()} km/h)") }
+                        )
+                    }
+                }
+
+                // Custom Speed Slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Speed: ${selectedSpeedKmH.toInt()} km/h",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.width(100.dp)
+                    )
+                    Slider(
+                        value = selectedSpeedKmH,
+                        onValueChange = { speed ->
+                            selectedSpeedKmH = speed
+                            if (isSpoofingActive) {
+                                onUpdateMovement(0f, 0f, selectedSpeedKmH)
+                            }
+                        },
+                        valueRange = 1f..120f,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // System Overlay Toggle Switch Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Floating System Joystick Overlay",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Switch(
+                        checked = isOverlayRunning,
+                        onCheckedChange = { enable ->
+                            if (enable) {
+                                if (Settings.canDrawOverlays(context)) {
+                                    JoystickOverlayService.startOverlay(context)
+                                } else {
+                                    val intent = Intent(
+                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        Uri.parse("package:${context.packageName}")
+                                    )
+                                    context.startActivity(intent)
+                                }
+                            } else {
+                                JoystickOverlayService.stopOverlay(context)
+                            }
+                        }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Main Toggle Button
                 Button(
                     onClick = {
                         if (isSpoofingActive) {
                             onStopSpoofing()
+                            JoystickOverlayService.stopOverlay(context)
                         } else {
-                            onStartSpoofing(selectedLocation.latitude, selectedLocation.longitude)
+                            onStartSpoofing(
+                                selectedLocation.latitude,
+                                selectedLocation.longitude,
+                                selectedSpeedKmH
+                            )
                         }
                     },
                     colors = ButtonDefaults.buttonColors(
