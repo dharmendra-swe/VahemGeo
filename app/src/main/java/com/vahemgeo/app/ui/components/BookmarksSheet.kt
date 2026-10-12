@@ -3,12 +3,16 @@ package com.vahemgeo.app.ui.components
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -42,7 +46,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.vahemgeo.app.data.local.BookmarkEntity
 import com.vahemgeo.app.data.local.HistoryEntity
 import com.vahemgeo.app.ui.theme.CyberTeal
@@ -79,8 +85,10 @@ fun BookmarksSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(0.75f)
-                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .fillMaxHeight(0.8f)
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = 16.dp, vertical = 6.dp)
         ) {
             TabRow(
                 selectedTabIndex = selectedTab,
@@ -90,22 +98,38 @@ fun BookmarksSheet(
                 Tab(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    text = { Text("Bookmarks (${bookmarks.size})", fontWeight = FontWeight.SemiBold) },
-                    icon = { Icon(Icons.Default.Bookmark, contentDescription = null) },
+                    text = {
+                        Text(
+                            "Bookmarks (${bookmarks.size})",
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    icon = { Icon(Icons.Default.Bookmark, contentDescription = null, modifier = Modifier.size(18.dp)) },
                     selectedContentColor = ElectricLime,
                     unselectedContentColor = MutedSage
                 )
                 Tab(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
-                    text = { Text("History", fontWeight = FontWeight.SemiBold) },
-                    icon = { Icon(Icons.Default.History, contentDescription = null) },
+                    text = {
+                        Text(
+                            "History (${historyLogs.size})",
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    icon = { Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(18.dp)) },
                     selectedContentColor = ElectricLime,
                     unselectedContentColor = MutedSage
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             if (selectedTab == 0) {
                 // Bookmarks Tab
@@ -116,16 +140,22 @@ fun BookmarksSheet(
                 ) {
                     Text(
                         text = "Saved Favorites",
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = PolarWhite
                     )
                     Button(
-                        onClick = { showAddDialog = true },
+                        onClick = { showAddDialog = !showAddDialog },
                         colors = ButtonDefaults.buttonColors(containerColor = ElectricLime),
-                        shape = RoundedCornerShape(12.dp)
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
-                        Text("+ Bookmark Current", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
+                        Text(
+                            "+ Save Pin",
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
                     }
                 }
 
@@ -135,27 +165,29 @@ fun BookmarksSheet(
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 8.dp),
+                            .padding(vertical = 6.dp),
                         colors = CardDefaults.cardColors(containerColor = CyberTeal),
-                        shape = RoundedCornerShape(16.dp)
+                        shape = RoundedCornerShape(14.dp)
                     ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Text("New Bookmark", fontWeight = FontWeight.Bold, color = PolarWhite)
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text("New Bookmark (${"%.4f".format(currentLat)}, ${"%.4f".format(currentLng)})", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = PolarWhite)
                             Spacer(modifier = Modifier.height(6.dp))
                             OutlinedTextField(
                                 value = labelInput,
                                 onValueChange = { labelInput = it },
-                                label = { Text("Label (e.g. Home, Office)", color = MutedSage) },
+                                label = { Text("Label (e.g. Home, Office)", color = MutedSage, fontSize = 12.sp) },
+                                singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             OutlinedTextField(
                                 value = notesInput,
                                 onValueChange = { notesInput = it },
-                                label = { Text("Notes (optional)", color = MutedSage) },
+                                label = { Text("Notes (optional)", color = MutedSage, fontSize = 12.sp) },
+                                singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
-                            Spacer(modifier = Modifier.height(10.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
                             Row(modifier = Modifier.align(Alignment.End)) {
                                 TextButton(onClick = { showAddDialog = false }) {
                                     Text("Cancel", color = MutedSage)
@@ -179,7 +211,16 @@ fun BookmarksSheet(
                     }
                 }
 
-                LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                if (bookmarks.isEmpty() && !showAddDialog) {
+                    Text(
+                        text = "No saved locations yet. Tap '+ Save Pin' to save the selected coordinates.",
+                        color = MutedSage,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                }
+
+                LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
                     items(bookmarks) { b ->
                         Card(
                             modifier = Modifier
@@ -197,12 +238,12 @@ fun BookmarksSheet(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(Icons.Default.Place, contentDescription = null, tint = ElectricLime)
-                                Spacer(modifier = Modifier.width(12.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(b.label, fontWeight = FontWeight.Bold, color = PolarWhite)
+                                    Text(b.label, fontWeight = FontWeight.Bold, color = PolarWhite, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text("${"%.5f".format(b.latitude)}, ${"%.5f".format(b.longitude)}", style = MaterialTheme.typography.bodySmall, color = MutedSage)
                                     if (b.notes.isNotBlank()) {
-                                        Text(b.notes, style = MaterialTheme.typography.bodySmall, color = MutedSage.copy(alpha = 0.8f))
+                                        Text(b.notes, style = MaterialTheme.typography.bodySmall, color = MutedSage.copy(alpha = 0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
                                 }
                                 IconButton(onClick = { onDeleteBookmark(b) }) {
@@ -220,19 +261,30 @@ fun BookmarksSheet(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Recent Locations",
-                        style = MaterialTheme.typography.titleMedium,
+                        text = "Recent Locations & Routes",
+                        style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = PolarWhite
                     )
-                    TextButton(onClick = onClearHistory) {
-                        Text("Clear History", color = MaterialTheme.colorScheme.error)
+                    if (historyLogs.isNotEmpty()) {
+                        TextButton(onClick = onClearHistory) {
+                            Text("Clear All", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
-                LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                if (historyLogs.isEmpty()) {
+                    Text(
+                        text = "No spoofing history recorded yet.",
+                        color = MutedSage,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
+                }
+
+                LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
                     items(historyLogs) { h ->
                         Card(
                             modifier = Modifier
@@ -250,11 +302,13 @@ fun BookmarksSheet(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(Icons.Default.History, contentDescription = null, tint = ElectricLime)
-                                Spacer(modifier = Modifier.width(12.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text("${"%.5f".format(h.latitude)}, ${"%.5f".format(h.longitude)}", fontWeight = FontWeight.Bold, color = PolarWhite)
                                     if (h.label.isNotBlank()) {
-                                        Text(h.label, style = MaterialTheme.typography.bodySmall, color = MutedSage)
+                                        Text(h.label, fontWeight = FontWeight.Bold, color = PolarWhite, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text("${"%.5f".format(h.latitude)}, ${"%.5f".format(h.longitude)}", style = MaterialTheme.typography.bodySmall, color = MutedSage)
+                                    } else {
+                                        Text("${"%.5f".format(h.latitude)}, ${"%.5f".format(h.longitude)}", fontWeight = FontWeight.Bold, color = PolarWhite)
                                     }
                                 }
                             }

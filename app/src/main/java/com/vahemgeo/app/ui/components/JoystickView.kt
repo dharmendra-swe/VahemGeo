@@ -29,6 +29,8 @@ import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
 
+import androidx.compose.ui.graphics.graphicsLayer
+
 @Composable
 fun JoystickView(
     modifier: Modifier = Modifier,
@@ -117,6 +119,10 @@ fun JoystickView(
         Box(
             modifier = Modifier
                 .size(knobSize)
+                .graphicsLayer {
+                    translationX = knobOffset.x
+                    translationY = knobOffset.y
+                }
                 .background(
                     color = ElectricLime,
                     shape = CircleShape
