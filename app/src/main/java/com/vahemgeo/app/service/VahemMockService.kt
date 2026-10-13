@@ -1,5 +1,6 @@
 package com.vahemgeo.app.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,15 +8,19 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.vahemgeo.app.MainActivity
 import com.vahemgeo.app.engine.AntiLeakShieldManager
 import com.vahemgeo.app.engine.MicroJitterEngine
 import com.vahemgeo.app.engine.MockLocationManager
 import com.vahemgeo.app.engine.MovementUtils
-import com.vahemgeo.app.engine.OsrmRoutingService
 import com.vahemgeo.app.engine.SpeedMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -47,10 +52,14 @@ class VahemMockService : Service() {
     @Volatile
     private var activeIntensity: Float = 0f
 
-    // Route Simulation & Auto-Walk parameters
+    // Route Simulation & O(1) suffix distance lookup table
     @Volatile
     private var isRouteMode = false
+    @Volatile
     private var routePoints: List<GeoPoint> = emptyList()
+    @Volatile
+    private var routeSuffixDistances: DoubleArray = DoubleArray(0)
+    @Volatile
     private var currentRouteIdx = 0
     @Volatile
     private var autoLoop = false
@@ -63,19 +72,23 @@ class VahemMockService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        activeInstance = this
         mockManager = MockLocationManager(this)
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        activeInstance = this
+
         // Anti-Null-Island Recovery: if OS restarts service after memory pressure with null intent
         if (intent == null) {
             val saved = AntiLeakShieldManager.getLastSpoofedLocation(this)
             if (saved != null) {
                 currentLat = saved.latitude
                 currentLng = saved.longitude
-                startForeground(NOTIFICATION_ID, buildNotification(currentLat, currentLng))
-                startSpoofingLoop(currentLat, currentLng)
+                if (startForegroundSafely(currentLat, currentLng)) {
+                    startSpoofingLoop(currentLat, currentLng)
+                }
                 return START_STICKY
             } else {
                 stopSelf()
@@ -87,53 +100,33 @@ class VahemMockService : Service() {
 
         when (action) {
             ACTION_STOP_SPOOFING -> {
-                stopSpoofing()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                stopSpoofingInternal()
                 return START_NOT_STICKY
             }
             ACTION_UPDATE_LOCATION -> {
-                isRouteMode = false
-                isPaused = false
-                _isRoutePaused.value = false
-                currentLat = intent.getDoubleExtra(EXTRA_LAT, currentLat)
-                currentLng = intent.getDoubleExtra(EXTRA_LNG, currentLng)
-                AntiLeakShieldManager.saveSpoofedLocation(this, currentLat, currentLng)
-                updateNotification(currentLat, currentLng)
-                _currentLocation.value = Pair(currentLat, currentLng)
+                val lat = intent.getDoubleExtra(EXTRA_LAT, currentLat)
+                val lng = intent.getDoubleExtra(EXTRA_LNG, currentLng)
+                applyLocationUpdateInMemory(lat, lng)
                 return START_STICKY
             }
             ACTION_UPDATE_MOVEMENT -> {
-                if (intent.hasExtra(EXTRA_BEARING)) {
-                    activeBearing = intent.getFloatExtra(EXTRA_BEARING, activeBearing)
-                }
-                if (intent.hasExtra(EXTRA_INTENSITY)) {
-                    activeIntensity = intent.getFloatExtra(EXTRA_INTENSITY, activeIntensity)
-                }
-                if (intent.hasExtra(EXTRA_SPEED)) {
-                    activeSpeedKmH = intent.getFloatExtra(EXTRA_SPEED, activeSpeedKmH)
-                }
-                if (intent.hasExtra(EXTRA_AUTO_WALK)) {
-                    isAutoWalk = intent.getBooleanExtra(EXTRA_AUTO_WALK, isAutoWalk)
-                    _isAutoWalkEnabled.value = isAutoWalk
-                }
-                _currentSpeed.value = activeSpeedKmH
+                val bearing = if (intent.hasExtra(EXTRA_BEARING)) intent.getFloatExtra(EXTRA_BEARING, activeBearing) else null
+                val intensity = if (intent.hasExtra(EXTRA_INTENSITY)) intent.getFloatExtra(EXTRA_INTENSITY, activeIntensity) else null
+                val speed = if (intent.hasExtra(EXTRA_SPEED)) intent.getFloatExtra(EXTRA_SPEED, activeSpeedKmH) else null
+                val walk = if (intent.hasExtra(EXTRA_AUTO_WALK)) intent.getBooleanExtra(EXTRA_AUTO_WALK, isAutoWalk) else null
+                applyMovementUpdateInMemory(bearing, intensity, speed, walk)
                 return START_STICKY
             }
             ACTION_SET_JITTER -> {
-                isStealthJitter = intent.getBooleanExtra(EXTRA_JITTER, true)
-                _isJitterEnabled.value = isStealthJitter
+                applyJitterInMemory(intent.getBooleanExtra(EXTRA_JITTER, true))
                 return START_STICKY
             }
             ACTION_SET_AUTO_WALK -> {
-                isAutoWalk = intent.getBooleanExtra(EXTRA_AUTO_WALK, false)
-                _isAutoWalkEnabled.value = isAutoWalk
+                applyAutoWalkInMemory(intent.getBooleanExtra(EXTRA_AUTO_WALK, false))
                 return START_STICKY
             }
             ACTION_SET_ROUTE_PAUSED -> {
-                isPaused = intent.getBooleanExtra(EXTRA_ROUTE_PAUSED, false)
-                _isRoutePaused.value = isPaused
-                updateNotification(currentLat, currentLng)
+                applyRoutePausedInMemory(intent.getBooleanExtra(EXTRA_ROUTE_PAUSED, false))
                 return START_STICKY
             }
             ACTION_SET_AUTO_LOOP -> {
@@ -141,27 +134,28 @@ class VahemMockService : Service() {
                 return START_STICKY
             }
             ACTION_START_ROUTE -> {
-                val lats = intent.getDoubleArrayExtra(EXTRA_ROUTE_LATS) ?: doubleArrayOf()
-                val lngs = intent.getDoubleArrayExtra(EXTRA_ROUTE_LNGS) ?: doubleArrayOf()
                 autoLoop = intent.getBooleanExtra(EXTRA_LOOP, false)
                 activeSpeedKmH = intent.getFloatExtra(EXTRA_SPEED, activeSpeedKmH)
 
-                if (lats.isNotEmpty() && lats.size == lngs.size) {
-                    routePoints = lats.indices.map { GeoPoint(lats[it], lngs[it]) }
-                    currentRouteIdx = if (routePoints.size > 1) 1 else 0
+                val points = pendingRoutePoints
+                if (points.isNotEmpty()) {
+                    routePoints = points
+                    routeSuffixDistances = buildSuffixDistanceTable(points)
+                    currentRouteIdx = if (points.size > 1) 1 else 0
                     isRouteMode = true
                     isPaused = false
                     _isRoutePaused.value = false
-                    _activeRoute.value = routePoints
-                    val totalDist = OsrmRoutingService.computeTotalDistanceMeters(routePoints)
+                    _activeRoute.value = points
+                    val totalDist = if (routeSuffixDistances.isNotEmpty()) routeSuffixDistances[0] else 0.0
                     _totalRouteDistanceMeters.value = totalDist
                     _remainingDistanceMeters.value = totalDist
                     _routeProgress.value = 0f
 
-                    val startPt = routePoints[0]
+                    val startPt = points[0]
                     AntiLeakShieldManager.saveSpoofedLocation(this, startPt.latitude, startPt.longitude)
-                    startForeground(NOTIFICATION_ID, buildNotification(startPt.latitude, startPt.longitude))
-                    startSpoofingLoop(startPt.latitude, startPt.longitude)
+                    if (startForegroundSafely(startPt.latitude, startPt.longitude)) {
+                        startSpoofingLoop(startPt.latitude, startPt.longitude)
+                    }
                 }
                 return START_STICKY
             }
@@ -178,12 +172,112 @@ class VahemMockService : Service() {
                 activeSpeedKmH = intent.getFloatExtra(EXTRA_SPEED, activeSpeedKmH)
 
                 AntiLeakShieldManager.saveSpoofedLocation(this, currentLat, currentLng)
-                startForeground(NOTIFICATION_ID, buildNotification(currentLat, currentLng))
-                startSpoofingLoop(currentLat, currentLng)
+                if (startForegroundSafely(currentLat, currentLng)) {
+                    startSpoofingLoop(currentLat, currentLng)
+                }
             }
         }
 
         return START_STICKY
+    }
+
+    /**
+     * Safely promotes service to Foreground with ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION on Android 14/15 (API 34/35).
+     */
+    private fun startForegroundSafely(lat: Double, lng: Double): Boolean {
+        val hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasCoarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!hasFine && !hasCoarse) {
+            _securityError.value = "Grant Location Permission first to start Foreground Spoof Service"
+            _isSpoofingActive.value = false
+            stopSelf()
+            return false
+        }
+
+        return try {
+            val notification = buildNotification(lat, lng)
+            val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            } else {
+                0
+            }
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgsType)
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            _securityError.value = "Unable to start Foreground Location Service: ${e.localizedMessage ?: "Permission error"}"
+            _isSpoofingActive.value = false
+            stopSelf()
+            false
+        }
+    }
+
+    private fun applyLocationUpdateInMemory(lat: Double, lng: Double) {
+        isRouteMode = false
+        isPaused = false
+        _isRoutePaused.value = false
+        currentLat = lat
+        currentLng = lng
+        AntiLeakShieldManager.saveSpoofedLocation(this, currentLat, currentLng)
+        updateNotification(currentLat, currentLng)
+        _currentLocation.value = Pair(currentLat, currentLng)
+    }
+
+    private fun applyMovementUpdateInMemory(
+        bearing: Float?,
+        intensity: Float?,
+        speedKmH: Float?,
+        autoWalk: Boolean?
+    ) {
+        if (bearing != null) activeBearing = bearing
+        if (intensity != null) activeIntensity = intensity
+        if (speedKmH != null) {
+            activeSpeedKmH = speedKmH
+            _currentSpeed.value = activeSpeedKmH
+        }
+        if (autoWalk != null) {
+            isAutoWalk = autoWalk
+            _isAutoWalkEnabled.value = isAutoWalk
+        }
+    }
+
+    private fun applyJitterInMemory(enabled: Boolean) {
+        isStealthJitter = enabled
+        _isJitterEnabled.value = enabled
+    }
+
+    private fun applyAutoWalkInMemory(enabled: Boolean) {
+        isAutoWalk = enabled
+        _isAutoWalkEnabled.value = enabled
+    }
+
+    private fun applyRoutePausedInMemory(paused: Boolean) {
+        isPaused = paused
+        _isRoutePaused.value = paused
+        updateNotification(currentLat, currentLng)
+    }
+
+    private fun stopSpoofingInternal() {
+        stopSpoofing()
+        try {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        } catch (_: Exception) {}
+        stopSelf()
+    }
+
+    /**
+     * Precomputes suffix distances in O(N) once so 10Hz route progress updates run in O(1) time.
+     * table[i] = remaining distance along path from points[i] to points.last()
+     */
+    private fun buildSuffixDistanceTable(points: List<GeoPoint>): DoubleArray {
+        val n = points.size
+        if (n == 0) return DoubleArray(0)
+        val table = DoubleArray(n)
+        table[n - 1] = 0.0
+        for (i in n - 2 downTo 0) {
+            table[i] = table[i + 1] + points[i].distanceToAsDouble(points[i + 1])
+        }
+        return table
     }
 
     private fun acquireWakeLock() {
@@ -233,9 +327,12 @@ class VahemMockService : Service() {
             spoofJob = serviceScope.launch {
                 while (_isSpoofingActive.value) {
                     var currentSpeedMps = 0f
+                    val pointsSnapshot = routePoints
+                    val suffixSnapshot = routeSuffixDistances
 
-                    if (isRouteMode && routePoints.isNotEmpty() && !isPaused) {
-                        val targetPoint = routePoints[currentRouteIdx]
+                    if (isRouteMode && pointsSnapshot.isNotEmpty() && !isPaused) {
+                        val safeIdx = currentRouteIdx.coerceIn(0, pointsSnapshot.size - 1)
+                        val targetPoint = pointsSnapshot[safeIdx]
                         val dynamicSpeed = MovementUtils.applySpeedVariance(activeSpeedKmH)
                         val stepDistance = MovementUtils.speedToMetersPerInterval(dynamicSpeed, updateIntervalMs)
                         currentSpeedMps = (dynamicSpeed / 3.6f)
@@ -250,8 +347,8 @@ class VahemMockService : Service() {
                         if (distToTarget <= stepDistance) {
                             currentLat = targetPoint.latitude
                             currentLng = targetPoint.longitude
-                            if (currentRouteIdx < routePoints.size - 1) {
-                                currentRouteIdx++
+                            if (safeIdx < pointsSnapshot.size - 1) {
+                                currentRouteIdx = safeIdx + 1
                             } else if (autoLoop) {
                                 currentRouteIdx = 0
                             } else {
@@ -268,8 +365,12 @@ class VahemMockService : Service() {
                             currentLng = nextLng
                         }
 
-                        // Update live route telemetry (Remaining distance & Progress %)
-                        val remDist = calculateRemainingRouteDistance(currentLat, currentLng, currentRouteIdx, routePoints)
+                        // O(1) Remaining Route Distance lookup (zero CPU lag even on 50,000-point GPX routes)
+                        val activeIdx = currentRouteIdx.coerceIn(0, pointsSnapshot.size - 1)
+                        val distToActiveTarget = GeoPoint(currentLat, currentLng).distanceToAsDouble(pointsSnapshot[activeIdx])
+                        val suffixDist = if (activeIdx < suffixSnapshot.size) suffixSnapshot[activeIdx] else 0.0
+                        val remDist = distToActiveTarget + suffixDist
+
                         _remainingDistanceMeters.value = remDist
                         val totalDist = _totalRouteDistanceMeters.value
                         _routeProgress.value = if (totalDist > 1.0) {
@@ -323,7 +424,9 @@ class VahemMockService : Service() {
             _securityError.value = "Mock Location permission disabled in Developer Options"
             _isSpoofingActive.value = false
             releaseWakeLock()
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            try {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            } catch (_: Exception) {}
             stopSelf()
         } catch (e: Exception) {
             e.printStackTrace()
@@ -331,20 +434,6 @@ class VahemMockService : Service() {
             releaseWakeLock()
             stopSelf()
         }
-    }
-
-    private fun calculateRemainingRouteDistance(
-        curLat: Double,
-        curLng: Double,
-        targetIdx: Int,
-        points: List<GeoPoint>
-    ): Double {
-        if (points.isEmpty() || targetIdx >= points.size) return 0.0
-        var dist = GeoPoint(curLat, curLng).distanceToAsDouble(points[targetIdx])
-        for (i in targetIdx until points.size - 1) {
-            dist += points[i].distanceToAsDouble(points[i + 1])
-        }
-        return dist
     }
 
     private fun stopSpoofing() {
@@ -364,6 +453,9 @@ class VahemMockService : Service() {
     }
 
     override fun onDestroy() {
+        if (activeInstance === this) {
+            activeInstance = null
+        }
         stopSpoofing()
         serviceScope.cancel()
         super.onDestroy()
@@ -447,12 +539,17 @@ class VahemMockService : Service() {
         const val EXTRA_BEARING = "EXTRA_BEARING"
         const val EXTRA_INTENSITY = "EXTRA_INTENSITY"
         const val EXTRA_SPEED = "EXTRA_SPEED"
-        const val EXTRA_ROUTE_LATS = "EXTRA_ROUTE_LATS"
-        const val EXTRA_ROUTE_LNGS = "EXTRA_ROUTE_LNGS"
         const val EXTRA_LOOP = "EXTRA_LOOP"
         const val EXTRA_JITTER = "EXTRA_JITTER"
         const val EXTRA_AUTO_WALK = "EXTRA_AUTO_WALK"
         const val EXTRA_ROUTE_PAUSED = "EXTRA_ROUTE_PAUSED"
+
+        @Volatile
+        private var activeInstance: VahemMockService? = null
+
+        // In-memory route buffer so arbitrarily large GPX / OSRM routes never trigger TransactionTooLargeException
+        @Volatile
+        private var pendingRoutePoints: List<GeoPoint> = emptyList()
 
         private val _isSpoofingActive = MutableStateFlow(false)
         val isSpoofingActive: StateFlow<Boolean> = _isSpoofingActive.asStateFlow()
@@ -494,88 +591,90 @@ class VahemMockService : Service() {
                 putExtra(EXTRA_LNG, lng)
                 putExtra(EXTRA_SPEED, speedKmH)
             }
-            context.startForegroundService(intent)
+            ContextCompat.startForegroundService(context, intent)
         }
 
         fun startRouteService(context: Context, routePoints: List<GeoPoint>, speedKmH: Float, autoLoop: Boolean) {
-            val lats = routePoints.map { it.latitude }.toDoubleArray()
-            val lngs = routePoints.map { it.longitude }.toDoubleArray()
-
+            pendingRoutePoints = routePoints.toList()
             val intent = Intent(context, VahemMockService::class.java).apply {
                 action = ACTION_START_ROUTE
-                putExtra(EXTRA_ROUTE_LATS, lats)
-                putExtra(EXTRA_ROUTE_LNGS, lngs)
                 putExtra(EXTRA_SPEED, speedKmH)
                 putExtra(EXTRA_LOOP, autoLoop)
             }
-            context.startForegroundService(intent)
+            ContextCompat.startForegroundService(context, intent)
         }
 
         fun stopService(context: Context) {
-            val intent = Intent(context, VahemMockService::class.java).apply {
-                action = ACTION_STOP_SPOOFING
+            val instance = activeInstance
+            if (instance != null) {
+                instance.stopSpoofingInternal()
+            } else {
+                try {
+                    context.stopService(Intent(context, VahemMockService::class.java))
+                } catch (_: Exception) {}
             }
-            context.startService(intent)
         }
 
         fun updateLocation(context: Context, lat: Double, lng: Double) {
-            val intent = Intent(context, VahemMockService::class.java).apply {
-                action = ACTION_UPDATE_LOCATION
-                putExtra(EXTRA_LAT, lat)
-                putExtra(EXTRA_LNG, lng)
+            val instance = activeInstance
+            if (instance != null) {
+                instance.applyLocationUpdateInMemory(lat, lng)
+            } else if (_isSpoofingActive.value) {
+                startService(context, lat, lng, _currentSpeed.value)
             }
-            context.startService(intent)
         }
 
         fun updateMovement(context: Context, bearing: Float, intensity: Float, speedKmH: Float, autoWalk: Boolean? = null) {
-            val intent = Intent(context, VahemMockService::class.java).apply {
-                action = ACTION_UPDATE_MOVEMENT
-                putExtra(EXTRA_BEARING, bearing)
-                putExtra(EXTRA_INTENSITY, intensity)
-                putExtra(EXTRA_SPEED, speedKmH)
-                if (autoWalk != null) putExtra(EXTRA_AUTO_WALK, autoWalk)
+            val instance = activeInstance
+            if (instance != null) {
+                instance.applyMovementUpdateInMemory(bearing, intensity, speedKmH, autoWalk)
+            } else {
+                _currentSpeed.value = speedKmH
+                if (autoWalk != null) _isAutoWalkEnabled.value = autoWalk
             }
-            context.startService(intent)
         }
 
         fun updateSpeed(context: Context, speedKmH: Float) {
-            val intent = Intent(context, VahemMockService::class.java).apply {
-                action = ACTION_UPDATE_MOVEMENT
-                putExtra(EXTRA_SPEED, speedKmH)
+            val instance = activeInstance
+            if (instance != null) {
+                instance.applyMovementUpdateInMemory(null, null, speedKmH, null)
+            } else {
+                _currentSpeed.value = speedKmH
             }
-            context.startService(intent)
         }
 
         fun setJitter(context: Context, enabled: Boolean) {
-            val intent = Intent(context, VahemMockService::class.java).apply {
-                action = ACTION_SET_JITTER
-                putExtra(EXTRA_JITTER, enabled)
+            val instance = activeInstance
+            if (instance != null) {
+                instance.applyJitterInMemory(enabled)
+            } else {
+                _isJitterEnabled.value = enabled
             }
-            context.startService(intent)
         }
 
         fun setAutoWalk(context: Context, enabled: Boolean) {
-            val intent = Intent(context, VahemMockService::class.java).apply {
-                action = ACTION_SET_AUTO_WALK
-                putExtra(EXTRA_AUTO_WALK, enabled)
+            val instance = activeInstance
+            if (instance != null) {
+                instance.applyAutoWalkInMemory(enabled)
+            } else {
+                _isAutoWalkEnabled.value = enabled
             }
-            context.startService(intent)
         }
 
         fun setRoutePaused(context: Context, paused: Boolean) {
-            val intent = Intent(context, VahemMockService::class.java).apply {
-                action = ACTION_SET_ROUTE_PAUSED
-                putExtra(EXTRA_ROUTE_PAUSED, paused)
+            val instance = activeInstance
+            if (instance != null) {
+                instance.applyRoutePausedInMemory(paused)
+            } else {
+                _isRoutePaused.value = paused
             }
-            context.startService(intent)
         }
 
         fun setAutoLoop(context: Context, loop: Boolean) {
-            val intent = Intent(context, VahemMockService::class.java).apply {
-                action = ACTION_SET_AUTO_LOOP
-                putExtra(EXTRA_LOOP, loop)
+            val instance = activeInstance
+            if (instance != null) {
+                instance.autoLoop = loop
             }
-            context.startService(intent)
         }
     }
 }

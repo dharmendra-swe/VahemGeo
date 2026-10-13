@@ -1,9 +1,11 @@
 package com.vahemgeo.app.ui
 
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Paint
 import android.net.Uri
 import android.provider.Settings
+import android.view.MotionEvent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -63,6 +65,7 @@ import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -86,6 +89,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -134,11 +138,13 @@ import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.CustomZoomButtonsController
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
 import java.util.Locale
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 private enum class SearchTargetField {
@@ -147,6 +153,7 @@ private enum class SearchTargetField {
     ROUTE_TO
 }
 
+@SuppressLint("ClickableViewAccessibility")
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MapScreen(
@@ -193,6 +200,13 @@ fun MapScreen(
     var isLocatingCurrentGps by remember { mutableStateOf(false) }
     var hasInitializedCurrentLocation by remember { mutableStateOf(false) }
 
+    // Camera Follow vs Free-Pan Mode (prevents camera yank during 10Hz spoofing)
+    var isFollowingLiveLocation by remember { mutableStateOf(true) }
+    var lastCameraAnimatedGeo by remember { mutableStateOf<GeoPoint?>(null) }
+
+    // Anti-Teleport Cooldown Guard State
+    var pendingTeleportTarget by remember { mutableStateOf<Pair<GeoPoint, String>?>(null) }
+
     // Map & Overlays references
     var mapViewRef by remember { mutableStateOf<MapView?>(null) }
     var targetMarkerRef by remember { mutableStateOf<Marker?>(null) }
@@ -234,7 +248,7 @@ fun MapScreen(
     }
 
     // Helper to calculate route between routeStartPoint (A) and routeEndPoint (B)
-    fun recalculateABRoute(animateToFit: Boolean = true) {
+    fun recalculateABRoute(animateToFit: Boolean = true, autoStartAfterCalc: Boolean = false) {
         val start = routeStartPoint ?: return
         val end = routeEndPoint ?: return
         scope.launch {
@@ -246,6 +260,7 @@ fun MapScreen(
             isCalculatingRoute = false
 
             if (animateToFit && result.points.size >= 2) {
+                isFollowingLiveLocation = false
                 try {
                     val bbox = BoundingBox.fromGeoPoints(result.points)
                     mapViewRef?.post {
@@ -255,6 +270,45 @@ fun MapScreen(
                     }
                 } catch (_: Exception) {}
             }
+
+            if (autoStartAfterCalc && result.points.size >= 2) {
+                isFollowingLiveLocation = true
+                onStartRouteSpoofing(
+                    result.points,
+                    selectedSpeedKmH,
+                    autoLoop,
+                    "$routeStartLabel ➔ $routeEndLabel"
+                )
+            }
+        }
+    }
+
+    // Helper to safely handle a target location selection (with Anti-Teleport Guard when spoofing is active)
+    fun handleSinglePointSelection(targetPt: GeoPoint, label: String?) {
+        if (isSpoofingActive) {
+            val distMeters = selectedLocation.distanceToAsDouble(targetPt)
+            if (distMeters > 500.0) {
+                // Trigger Anti-Teleport Guard for jumps > 500 meters while spoofing is live
+                pendingTeleportTarget = Pair(
+                    targetPt,
+                    label ?: "${"%.4f".format(Locale.US, targetPt.latitude)}, ${"%.4f".format(Locale.US, targetPt.longitude)}"
+                )
+                return
+            }
+            selectedLocation = targetPt
+            onUpdateLocation(targetPt.latitude, targetPt.longitude)
+        } else {
+            selectedLocation = targetPt
+        }
+
+        if (label != null) {
+            selectedLocationLabel = if (isSpoofingActive) "Spoofed • $label" else label
+        } else {
+            selectedLocationLabel = "${"%.5f".format(Locale.US, targetPt.latitude)}, ${"%.5f".format(Locale.US, targetPt.longitude)}"
+            scope.launch {
+                val resolved = LocationSearchService.reverseGeocode(targetPt.latitude, targetPt.longitude)
+                selectedLocationLabel = if (isSpoofingActive) "Spoofed • $resolved" else resolved
+            }
         }
     }
 
@@ -262,9 +316,11 @@ fun MapScreen(
     fun locateAndSelectCurrentPosition(setAsRouteStartToo: Boolean = false) {
         scope.launch {
             isLocatingCurrentGps = true
+            isFollowingLiveLocation = true
             val currentPt = AntiLeakShieldManager.fetchCurrentDeviceLocation(context, isSpoofingActive)
             if (currentPt != null) {
                 selectedLocation = currentPt
+                lastCameraAnimatedGeo = currentPt
                 if (setAsRouteStartToo || routeStartPoint == null) {
                     routeStartPoint = currentPt
                     routeStartLabel = "Current Location (${"%.4f".format(Locale.US, currentPt.latitude)}, ${"%.4f".format(Locale.US, currentPt.longitude)})"
@@ -323,13 +379,21 @@ fun MapScreen(
         }
     }
 
-    // Sync live spoofed location updates onto the map
+    // Sync live spoofed location updates onto the map WITHOUT locking user camera panning!
     LaunchedEffect(currentLocation, isSpoofingActive) {
         if (isSpoofingActive && currentLocation != null) {
             val point = GeoPoint(currentLocation.first, currentLocation.second)
             selectedLocation = point
             targetMarkerRef?.position = point
-            mapViewRef?.controller?.animateTo(point)
+
+            // Only animate camera if user hasn't manually panned away AND moved >= 2.5m (ignores sub-meter jitter)
+            if (isFollowingLiveLocation) {
+                val prevCam = lastCameraAnimatedGeo
+                if (prevCam == null || prevCam.distanceToAsDouble(point) >= 2.5) {
+                    lastCameraAnimatedGeo = point
+                    mapViewRef?.controller?.animateTo(point)
+                }
+            }
             mapViewRef?.invalidate()
         }
     }
@@ -351,12 +415,30 @@ fun MapScreen(
                 MapView(ctx).apply {
                     setTileSource(TileSourceFactory.MAPNIK)
                     setMultiTouchControls(true)
-                    zoomController.setVisibility(org.osmdroid.views.CustomZoomButtonsController.Visibility.NEVER)
+                    zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
                     setScrollableAreaLimitDouble(BoundingBox(85.0, 180.0, -85.0, -180.0))
                     minZoomLevel = 3.0
                     maxZoomLevel = 20.0
                     controller.setZoom(16.0)
                     controller.setCenter(selectedLocation)
+
+                    // Detect manual user finger drag on map to unlock camera follow during spoofing
+                    var downX = 0f
+                    var downY = 0f
+                    setOnTouchListener { _, event ->
+                        when (event.actionMasked) {
+                            MotionEvent.ACTION_DOWN -> {
+                                downX = event.x
+                                downY = event.y
+                            }
+                            MotionEvent.ACTION_MOVE -> {
+                                if (hypot((event.x - downX).toDouble(), (event.y - downY).toDouble()) > 24.0) {
+                                    isFollowingLiveLocation = false
+                                }
+                            }
+                        }
+                        false
+                    }
 
                     val eventsOverlay = MapEventsOverlay(object : MapEventsReceiver {
                         override fun singleTapConfirmedHelper(p: GeoPoint): Boolean {
@@ -387,15 +469,7 @@ fun MapScreen(
                                     recalculateABRoute(animateToFit = false)
                                 }
                             } else {
-                                selectedLocation = p
-                                selectedLocationLabel = "${"%.5f".format(Locale.US, p.latitude)}, ${"%.5f".format(Locale.US, p.longitude)}"
-                                if (isSpoofingActive) {
-                                    onUpdateLocation(p.latitude, p.longitude)
-                                }
-                                scope.launch {
-                                    val name = LocationSearchService.reverseGeocode(p.latitude, p.longitude)
-                                    selectedLocationLabel = if (isSpoofingActive) "Spoofed • $name" else name
-                                }
+                                handleSinglePointSelection(p, null)
                             }
                             invalidate()
                             return true
@@ -703,13 +777,9 @@ fun MapScreen(
                                                         }
                                                         recalculateABRoute(animateToFit = true)
                                                     } else {
-                                                        selectedLocation = pt
-                                                        selectedLocationLabel = "${item.title} (${item.subtitle})"
                                                         mapViewRef?.controller?.animateTo(pt)
                                                         mapViewRef?.controller?.setZoom(16.5)
-                                                        if (isSpoofingActive) {
-                                                            onUpdateLocation(pt.latitude, pt.longitude)
-                                                        }
+                                                        handleSinglePointSelection(pt, "${item.title} (${item.subtitle})")
                                                     }
                                                     searchQuery = ""
                                                     searchResults = emptyList()
@@ -749,8 +819,8 @@ fun MapScreen(
                             Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Column(modifier = Modifier.weight(1f)) {
-                                Text("Mock Location Not Enabled", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                                Text("Select 'VahemGeo' in Developer Options", style = MaterialTheme.typography.bodySmall, fontSize = 11.sp)
+                                Text("Mock Location / Permission Alert", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                                Text(securityError ?: "Select 'VahemGeo' in Developer Options", style = MaterialTheme.typography.bodySmall, fontSize = 11.sp)
                             }
                             OutlinedButton(
                                 onClick = {
@@ -795,7 +865,7 @@ fun MapScreen(
                     )
                 }
 
-                // Right-Side Floating Map Buttons (My Current Location + Fit Route)
+                // Right-Side Floating Map Buttons (My Current Location / Re-Center Follow + Fit Route)
                 Column(
                     modifier = Modifier.align(Alignment.BottomEnd),
                     horizontalAlignment = Alignment.End,
@@ -804,6 +874,7 @@ fun MapScreen(
                     if (isRouteMode && waypoints.size >= 2) {
                         SmallFloatingActionButton(
                             onClick = {
+                                isFollowingLiveLocation = false
                                 try {
                                     val bbox = BoundingBox.fromGeoPoints(waypoints)
                                     mapViewRef?.zoomToBoundingBox(bbox, true, 120)
@@ -818,8 +889,16 @@ fun MapScreen(
                     }
 
                     FloatingActionButton(
-                        onClick = { locateAndSelectCurrentPosition(setAsRouteStartToo = false) },
-                        containerColor = SurfaceCard,
+                        onClick = {
+                            isFollowingLiveLocation = true
+                            if (isSpoofingActive) {
+                                lastCameraAnimatedGeo = selectedLocation
+                                mapViewRef?.controller?.animateTo(selectedLocation)
+                            } else {
+                                locateAndSelectCurrentPosition(setAsRouteStartToo = false)
+                            }
+                        },
+                        containerColor = if (isFollowingLiveLocation) SurfaceCard else CyberTeal,
                         contentColor = ElectricLime,
                         shape = CircleShape,
                         modifier = Modifier.size(46.dp)
@@ -831,7 +910,11 @@ fun MapScreen(
                                 color = ElectricLime
                             )
                         } else {
-                            Icon(Icons.Default.MyLocation, contentDescription = "My Current Location", modifier = Modifier.size(22.dp))
+                            Icon(
+                                imageVector = if (isFollowingLiveLocation) Icons.Default.MyLocation else Icons.Default.GpsFixed,
+                                contentDescription = "My Current Location / Follow",
+                                modifier = Modifier.size(22.dp)
+                            )
                         }
                     }
                 }
@@ -1341,6 +1424,7 @@ fun MapScreen(
                                     onStopSpoofing()
                                     JoystickOverlayService.stopOverlay(context)
                                 } else {
+                                    isFollowingLiveLocation = true
                                     if (isRouteMode) {
                                         val pointsToUse = when {
                                             waypoints.size >= 2 -> waypoints.toList()
@@ -1403,6 +1487,62 @@ fun MapScreen(
             }
         }
 
+        // Anti-Teleport Cooldown Guard Dialog (Prevents accidental 500km instant jump while spoofing is live)
+        pendingTeleportTarget?.let { (targetPt, targetLabel) ->
+            val jumpDist = selectedLocation.distanceToAsDouble(targetPt)
+            AlertDialog(
+                onDismissRequest = { pendingTeleportTarget = null },
+                containerColor = SurfaceCard,
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Shield, contentDescription = null, tint = ElectricLime)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Anti-Teleport Guard", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = PolarWhite)
+                    }
+                },
+                text = {
+                    Text(
+                        text = "You are currently spoofing live and tapped a point ${formatDistance(jumpDist)} away.\n\nInstant teleporting long distances while spoofing is active can trigger anti-cheat detection. Would you like to travel smoothly along a road route instead?",
+                        fontSize = 13.sp,
+                        color = MutedSage
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            routeStartPoint = selectedLocation
+                            routeStartLabel = selectedLocationLabel
+                            routeEndPoint = targetPt
+                            routeEndLabel = targetLabel
+                            isRouteMode = true
+                            pendingTeleportTarget = null
+                            recalculateABRoute(animateToFit = true, autoStartAfterCalc = true)
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ElectricLime)
+                    ) {
+                        Text("Move Smoothly (A ➔ B)", color = DarkCanvas, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(onClick = { pendingTeleportTarget = null }) {
+                            Text("Cancel", color = MutedSage)
+                        }
+                        TextButton(
+                            onClick = {
+                                pendingTeleportTarget = null
+                                selectedLocation = targetPt
+                                selectedLocationLabel = "Spoofed • $targetLabel"
+                                onUpdateLocation(targetPt.latitude, targetPt.longitude)
+                            }
+                        ) {
+                            Text("Teleport Anyway", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            )
+        }
+
         // Bookmarks & History Bottom Sheet Modal
         if (showBookmarksSheet) {
             BookmarksSheet(
@@ -1423,13 +1563,9 @@ fun MapScreen(
                         }
                         recalculateABRoute(animateToFit = true)
                     } else {
-                        selectedLocation = pt
-                        targetMarkerRef?.position = pt
                         mapViewRef?.controller?.animateTo(pt)
                         mapViewRef?.invalidate()
-                        scope.launch {
-                            selectedLocationLabel = LocationSearchService.reverseGeocode(lat, lng)
-                        }
+                        handleSinglePointSelection(pt, null)
                     }
                 },
                 onAddBookmark = onAddBookmark,

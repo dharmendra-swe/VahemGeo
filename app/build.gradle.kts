@@ -54,6 +54,9 @@ dependencies {
     // OkHttp for OSRM Route Requests
     implementation(libs.okhttp)
 
+    // Google Play Services FusedLocationProviderClient for GMS Mock Injection
+    implementation(libs.play.services.location)
+
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
